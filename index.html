@@ -164,6 +164,13 @@
     position: relative;
     overflow: hidden;
     border-radius: 8px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body.is-dragging, body.is-dragging * {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+    cursor: grabbing !important;
   }
   .task-row.dragging {
     opacity: 0.9;
@@ -229,6 +236,20 @@
   .task-row.done .task-text {
     text-decoration: line-through;
     color: var(--muted);
+  }
+  .task-edit-input {
+    flex: 1;
+    min-width: 0;
+    font-family: 'Yomogi', cursive;
+    font-size: 18px;
+    color: var(--ink);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid var(--pink);
+    outline: none;
+    padding: 0;
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   @media (max-width: 640px) {
@@ -393,9 +414,17 @@
     messagingSenderId: "766340014526",
     appId: "1:766340014526:web:be1e8756912f1e39e359ef"
   };
-  firebase.initializeApp(firebaseConfig);
-  const auth = firebase.auth();
-  const db = firebase.firestore();
+  let auth = null;
+  let db = null;
+  let firebaseReady = false;
+  try {
+    firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    db = firebase.firestore();
+    firebaseReady = true;
+  } catch (e) {
+    console.error('Firebase failed to load (sync will be unavailable):', e);
+  }
   let currentUser = null;
   let unsubscribeSnapshot = null;
   let suppressCloudWrite = false;
@@ -440,14 +469,14 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (e) { console.error('Could not save', e); }
-    if (currentUser && !suppressCloudWrite) {
+    if (firebaseReady && currentUser && !suppressCloudWrite) {
       cloudDocRef(currentUser.uid).set(data)
         .then(() => setSyncStatus('Synced ' + new Date().toLocaleTimeString()))
         .catch(e => setSyncStatus('Save error: ' + e.message));
     }
   }
 
-  auth.onAuthStateChanged((user) => {
+  if (firebaseReady) auth.onAuthStateChanged((user) => {
     currentUser = user;
     updateAuthUI();
     if (unsubscribeSnapshot) { unsubscribeSnapshot(); unsubscribeSnapshot = null; }
@@ -513,56 +542,67 @@
     const inner = el.querySelector('.task-row-inner');
     inner.querySelector('.task-text').textContent = t.text;
 
-    // --- drag handle: press-and-hold on the handle to reorder ---
+    // --- drag handle: press and drag the dots to reorder ---
+    // The dragged row follows the pointer; the other rows slide out of the way.
+    // Nothing is moved in the DOM until you let go, so there is no snapping.
     const handle = inner.querySelector('.drag-handle');
-    let dragging = false;
-    let startY = 0;
-    let containerEl = null;
+    handle.addEventListener('mousedown', (e) => e.preventDefault());
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      const rows = Array.from(el.parentElement.children);
+      const fromIndex = rows.indexOf(el);
+      if (fromIndex < 0) return;
 
-    function startDrag(e) {
-      dragging = true;
-      containerEl = el.parentElement;
-      startY = e.clientY;
+      const GAP = 6; // matches the gap in .tasks
+      const scrollY0 = window.scrollY;
+      const rects = rows.map(r => r.getBoundingClientRect());
+      const mids = rects.map(r => r.top + scrollY0 + r.height / 2);
+      const shift = rects[fromIndex].height + GAP;
+      const startPageY = e.pageY;
+      let toIndex = fromIndex;
+
+      closeAllSwipes();
+      if (window.getSelection) window.getSelection().removeAllRanges();
+      document.body.classList.add('is-dragging');
       el.classList.add('dragging');
+      el.style.transition = 'none';
+      rows.forEach(r => { if (r !== el) r.style.transition = 'transform 0.15s ease'; });
       try { handle.setPointerCapture(e.pointerId); } catch (err) {}
       if (navigator.vibrate) navigator.vibrate(10);
-    }
-    function onDragMove(e) {
-      if (!dragging) return;
-      const dy = e.clientY - startY;
-      el.style.transform = `translateY(${dy}px)`;
-      const siblings = Array.from(containerEl.children).filter(c => c !== el);
-      for (const sib of siblings) {
-        const rect = sib.getBoundingClientRect();
-        const mid = rect.top + rect.height / 2;
-        const pos = el.compareDocumentPosition(sib);
-        if (e.clientY < mid && (pos & Node.DOCUMENT_POSITION_PRECEDING)) {
-          containerEl.insertBefore(el, sib);
-          startY = e.clientY;
-          el.style.transform = 'translateY(0px)';
-          break;
-        } else if (e.clientY > mid && (pos & Node.DOCUMENT_POSITION_FOLLOWING)) {
-          containerEl.insertBefore(el, sib.nextSibling);
-          startY = e.clientY;
-          el.style.transform = 'translateY(0px)';
-          break;
-        }
+
+      function onMove(ev) {
+        const dy = ev.pageY - startPageY;
+        el.style.transform = `translateY(${dy}px)`;
+        const center = mids[fromIndex] + dy;
+        let idx = 0;
+        rows.forEach((r, i) => { if (i !== fromIndex && mids[i] < center) idx++; });
+        if (idx === toIndex) return;
+        toIndex = idx;
+        rows.forEach((r, i) => {
+          if (i === fromIndex) return;
+          let y = 0;
+          if (fromIndex < toIndex && i > fromIndex && i <= toIndex) y = -shift;
+          else if (fromIndex > toIndex && i >= toIndex && i < fromIndex) y = shift;
+          r.style.transform = y ? `translateY(${y}px)` : '';
+        });
       }
-    }
-    function onDragEnd() {
-      if (!dragging) return;
-      dragging = false;
-      el.classList.remove('dragging');
-      el.style.transform = '';
-      const ids = Array.from(containerEl.children).map(c => c.dataset.id);
-      data[listName].sort((a, b) => ids.indexOf(String(a.id)) - ids.indexOf(String(b.id)));
-      save();
-    }
-    handle.addEventListener('pointerdown', (e) => {
-      startDrag(e);
-      handle.addEventListener('pointermove', onDragMove);
-      handle.addEventListener('pointerup', onDragEnd, { once: true });
-      handle.addEventListener('pointercancel', onDragEnd, { once: true });
+      function onEnd(ev) {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+        document.body.classList.remove('is-dragging');
+        if (ev.type !== 'pointercancel' && toIndex !== fromIndex) {
+          const list = data[listName];
+          const moved = list.splice(fromIndex, 1)[0];
+          list.splice(toIndex, 0, moved);
+          save();
+        }
+        renderAll();
+      }
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
     });
 
     // --- swipe left on the row to reveal delete ---
@@ -570,15 +610,16 @@
     let swiping = false;
     let sStartX = 0, sStartY = 0, sCurX = 0;
     let decided = false; // has direction been determined yet
+    let moved = false;   // true if the pointer travelled (so a tap is not a tap)
 
     inner.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('.bullet') || e.target.closest('.drag-handle')) return;
+      if (e.target.closest('.bullet') || e.target.closest('.drag-handle') || e.target.closest('.task-edit-input')) return;
       sStartX = e.clientX;
       sStartY = e.clientY;
       sCurX = 0;
       decided = false;
       swiping = false;
-      inner.setPointerCapture(e.pointerId);
+      moved = false;
     });
     inner.addEventListener('pointermove', (e) => {
       if (sStartX === 0 && sStartY === 0) return;
@@ -587,10 +628,12 @@
       if (!decided) {
         if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
           decided = true;
+          moved = true;
           swiping = Math.abs(dx) > Math.abs(dy) * 1.2;
           if (swiping) {
             closeAllSwipes(inner);
             inner.classList.add('swiping');
+            try { inner.setPointerCapture(e.pointerId); } catch (err) {}
           }
         }
       }
@@ -608,6 +651,37 @@
     }
     inner.addEventListener('pointerup', endSwipe);
     inner.addEventListener('pointercancel', endSwipe);
+
+    // --- tap the words to edit them ---
+    const textEl = inner.querySelector('.task-text');
+    textEl.addEventListener('click', () => {
+      if (moved) { moved = false; return; }
+      if (inner.style.transform === `translateX(-${SWIPE_WIDTH}px)`) { closeAllSwipes(); return; }
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'task-edit-input';
+      input.maxLength = 300;
+      input.value = t.text;
+      textEl.replaceWith(input);
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      let finished = false;
+      function finish(commit) {
+        if (finished) return;
+        finished = true;
+        const v = input.value.trim();
+        if (commit && v && v !== t.text) {
+          t.text = v;
+          save();
+        }
+        renderAll();
+      }
+      input.addEventListener('blur', () => finish(true));
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+        else if (ev.key === 'Escape') { finish(false); }
+      });
+    });
 
     inner.querySelector('.bullet').addEventListener('click', () => {
       closeAllSwipes();
@@ -642,7 +716,7 @@
     const text = inputEl.value.trim();
     if (!text) return;
     data[listName] = data[listName] || [];
-    data[listName].unshift({
+    data[listName].push({
       id: 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
       text,
       done: false
@@ -710,13 +784,14 @@
   });
 
   document.getElementById('signInBtn').addEventListener('click', () => {
+    if (!firebaseReady) { setSyncStatus('Cloud sync unavailable here'); return; }
     const provider = new firebase.auth.GoogleAuthProvider();
     setSyncStatus('Opening sign-in…');
     auth.signInWithPopup(provider)
       .catch((e) => setSyncStatus('Sign-in error: ' + e.message));
   });
   document.getElementById('signOutBtn').addEventListener('click', () => {
-    auth.signOut();
+    if (firebaseReady) auth.signOut();
     settingsPanel.classList.remove('open');
   });
 
