@@ -572,11 +572,16 @@
       if (navigator.vibrate) navigator.vibrate(10);
 
       function onMove(ev) {
-        const dy = ev.pageY - startPageY;
+        // mouse already let go but we missed it: finish the drag now
+        if (ev.pointerType === 'mouse' && ev.buttons === 0) { onEnd(ev); return; }
+        // keep the dragged row inside the list (can't go past the first or last spot)
+        const minDy = rects[0].top - rects[fromIndex].top;
+        const maxDy = rects[rects.length - 1].top - rects[fromIndex].top;
+        const dy = Math.max(minDy, Math.min(maxDy, ev.pageY - startPageY));
         el.style.transform = `translateY(${dy}px)`;
         const center = mids[fromIndex] + dy;
         let idx = 0;
-        rows.forEach((r, i) => { if (i !== fromIndex && mids[i] < center) idx++; });
+        rows.forEach((r, i) => { if (i !== fromIndex && (i > fromIndex ? mids[i] <= center : mids[i] < center)) idx++; });
         if (idx === toIndex) return;
         toIndex = idx;
         rows.forEach((r, i) => {
@@ -587,10 +592,19 @@
           r.style.transform = y ? `translateY(${y}px)` : '';
         });
       }
+      let ended = false;
       function onEnd(ev) {
+        if (ended) return;
+        ended = true;
         handle.removeEventListener('pointermove', onMove);
         handle.removeEventListener('pointerup', onEnd);
         handle.removeEventListener('pointercancel', onEnd);
+        handle.removeEventListener('lostpointercapture', onEnd);
+        window.removeEventListener('pointerup', onEnd);
+        window.removeEventListener('pointercancel', onEnd);
+        window.removeEventListener('mouseup', onEnd);
+        window.removeEventListener('blur', onEnd);
+        try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
         document.body.classList.remove('is-dragging');
         if (ev.type !== 'pointercancel' && toIndex !== fromIndex) {
           const list = data[listName];
@@ -603,6 +617,11 @@
       handle.addEventListener('pointermove', onMove);
       handle.addEventListener('pointerup', onEnd);
       handle.addEventListener('pointercancel', onEnd);
+      handle.addEventListener('lostpointercapture', onEnd);
+      window.addEventListener('pointerup', onEnd);
+      window.addEventListener('pointercancel', onEnd);
+      window.addEventListener('mouseup', onEnd);
+      window.addEventListener('blur', onEnd);
     });
 
     // --- swipe left on the row to reveal delete ---
